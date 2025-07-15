@@ -3,6 +3,18 @@ import pandas as pd
 from pathlib import Path
 import logging
 import re
+from rpa_interface import RPAInterface
+
+rpa = RPAInterface()
+
+result = rpa.analyze_data(
+    rule_file="/tmp/rules.xlsx",   # Google Sheet → 本地
+    data_file="/tmp/data.xlsx",    # Google Sheet → 本地
+    output_file="/tmp/report.xlsx" # 生成的分析报告（RPA 再上传）
+)
+
+if not result["success"]:
+    print(result["message"])
 
 class ExcelAnalyzerControl:
     """
