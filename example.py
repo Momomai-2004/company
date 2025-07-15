@@ -1,3 +1,12 @@
+"""
+示例脚本
+----------
+演示如何使用 `ExcelAnalyzerControl`：
+1. 加载包含规则与业务数据的 Excel 文件
+2. 通过关键字查找规则 (regex)
+3. 对匹配规则进行逐条分析
+4. 生成完整的分析报告
+"""
 from excel_analyzer_control import ExcelAnalyzerControl
 
 def main():

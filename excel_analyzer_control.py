@@ -5,12 +5,27 @@ import logging
 import re
 
 class ExcelAnalyzerControl:
-    """Excel分析RPA控件
-    
-    主要功能：
-    1. 从Excel文件读取规则
-    2. 执行数据分析
-    3. 返回格式化结果
+    """
+    Excel 分析 RPA 控件
+    --------------------
+    该类封装了库存健康分析的整个流程，可被 RPA 无缝调用。
+
+    设计要点：
+    1. **规则驱动**：所有分析逻辑依赖规则表（第一个 sheet），无需硬编码。
+    2. **单文件部署**：控件内聚在一个文件，RPA 侧只需 `import excel_analyzer_control`。
+    3. **易扩展**：新增业务规则 → 添加 `_analyze_*` 方法并在 `analyze_by_rule` 分派即可。
+    4. **易追溯**：统一 `self.logger` 记录运行步骤与异常，方便排障。
+
+    典型调用示例::
+
+        from excel_analyzer_control import ExcelAnalyzerControl
+
+        analyzer = ExcelAnalyzerControl()
+        analyzer.load_excel('data_with_rules.xlsx')
+        results = analyzer.analyze_all()
+        analyzer.generate_report('analysis_report.xlsx', results)
+
+    当前已内置 8 条典型业务规则，详见各 `_analyze_*` 方法的实现。
     """
     
     def __init__(self):
@@ -351,6 +366,21 @@ class ExcelAnalyzerControl:
             return str(result) 
 
     def _analyze_inventory_efficiency(self, rule: pd.Series) -> Dict[str, Any]:
+        """规则 1：库存效率 (Inventory efficiency)
+
+        数据来源：KPI 工作表 G10 单元格（百分比数值）
+        判断逻辑：
+            <  80  → "整体库存水平较低"
+            80–120 → "整体库存水平合理"
+            > 120  → "整体库存水平较高"
+
+        返回字段：
+            success   : bool  是否成功
+            type      : str   "库存效率"
+            value     : float 原始百分比数值
+            status    : str   文本状态描述
+            suggestion: str   优化建议
+        """
         sheet_name = rule["Sheet"]
         value = self._get_cell_data(sheet_name, rule["Location"])
         try:
@@ -375,19 +405,36 @@ class ExcelAnalyzerControl:
         }
 
     def _fetch_top_with_pn(self, df: pd.DataFrame, value_col: str, pn_col: str, n: int, largest: bool = True) -> List[Tuple[Any, Any]]:
-        v_idx = self._col_letter_to_index(value_col)
-        pn_idx = self._col_letter_to_index(pn_col)
+        # 将列字母转换为 DataFrame 的数字索引
+        v_idx = self._col_letter_to_index(value_col)  # 指标列（如 AS / G / AO）
+        pn_idx = self._col_letter_to_index(pn_col)    # 料号列（如 E / A / AH）
+
+        # 取出指标列数据；`series` 与原 DataFrame 行索引保持一致
         series = df.iloc[:, v_idx]
+
+        # 根据 `largest` 控制方向，取前 n 个极值索引
         sorter = series.nlargest(n) if largest else series.nsmallest(n)
+
+        # 将极值行索引映射为 (PN, 数值) 二元组
         rows = sorter.index
-        result = []
+        result: List[Tuple[Any, Any]] = []
         for idx in rows:
-            pn = df.iloc[idx, pn_idx]
-            val = series.loc[idx]
+            pn = df.iloc[idx, pn_idx]   # 料号
+            val = series.loc[idx]       # 指标数值
             result.append((pn, val))
         return result
 
     def _analyze_shortage_risk(self, rule: pd.Series) -> Dict[str, Any]:
+        """规则 2：缺料风险 (Shortage risk)
+
+        数据来源：Results 工作表 AS 列（百分比）
+        处理逻辑：提取 AS 列 *最小* 的 5 行，代表缺料风险最高。
+        料号列：E 列。
+
+        返回字段：
+            items = [(pn, value), ...] 5 个元组
+            suggestion：优化建议
+        """
         sheet_name = rule["Sheet"]
         df = self.data_df[sheet_name]
         # AS列百分比最低的5个料号, 料号在E列
@@ -401,6 +448,12 @@ class ExcelAnalyzerControl:
         }
 
     def _analyze_dead_stock_risk(self, rule: pd.Series) -> Dict[str, Any]:
+        """规则 3：呆滞风险 (Dead stock risk)
+
+        数据来源：Results 工作表 AS 列（百分比）
+        处理逻辑：提取 AS 列 *最大* 的 5 行，表示呆滞比例最高。
+        料号列：E 列。
+        """
         sheet_name = rule["Sheet"]
         df = self.data_df[sheet_name]
         # AS列百分比最高的5个料号, 料号在E列
@@ -414,6 +467,12 @@ class ExcelAnalyzerControl:
         }
 
     def _analyze_dead_stock_value(self, rule: pd.Series) -> Dict[str, Any]:
+        """规则 4：金额最大的呆滞物料
+
+        数据来源：Analysis TOP short term savings 工作表 G 列（金金额度）
+        处理逻辑：取 G 列最大 3 行。
+        料号列：A 列。
+        """
         sheet_name = rule["Sheet"]
         df = self.data_df[sheet_name]
         # G列金额最大的3个, PN在A列
@@ -427,6 +486,12 @@ class ExcelAnalyzerControl:
         }
 
     def _analyze_transit_inconsistencies(self, rule: pd.Series) -> Dict[str, Any]:
+        """规则 5：运输天数不一致 (Days of transit inconsistencies)
+
+        数据来源：Analysis TOP HIGH RISKS PARAMETERS 工作表 D 列（运输天数）
+        处理逻辑：取 D 列最大 3 行，代表差异最大。
+        料号列：A 列。
+        """
         sheet_name = rule["Sheet"]
         df = self.data_df[sheet_name]
         # D列天数最大三个, PN在A列
@@ -440,6 +505,12 @@ class ExcelAnalyzerControl:
         }
 
     def _analyze_safety_time(self, rule: pd.Series) -> Dict[str, Any]:
+        """规则 6：安全时间过长 (Safety Time > 2 × Delivery frequency)
+
+        数据来源：Analysis TOP HIGH RISKS PARAMETERS 工作表 N 列
+        处理逻辑：取 N 列最大 1 行。
+        料号列：H 列。
+        """
         sheet_name = rule["Sheet"]
         df = self.data_df[sheet_name]
         # N列最大一个, PN在H列
@@ -453,6 +524,12 @@ class ExcelAnalyzerControl:
         }
 
     def _analyze_no_supplier(self, rule: pd.Series) -> Dict[str, Any]:
+        """规则 7：有需求但没有供应商 (Materials with requirements and no supplier)
+
+        数据来源：Analysis TOP HIGH RISKS PARAMETERS 工作表 Q 列
+        处理逻辑：筛选 Q 列非空料号，表示存在需求但未配置供应商。
+        返回纯料号列表。
+        """
         sheet_name = rule["Sheet"]
         df = self.data_df[sheet_name]
         q_idx = self._col_letter_to_index("Q")
@@ -466,6 +543,12 @@ class ExcelAnalyzerControl:
         }
 
     def _analyze_moq_impact(self, rule: pd.Series) -> Dict[str, Any]:
+        """规则 8：MOQ 影响 (MOQ impact on potential end-of-life material)
+
+        数据来源：Analysis TOP HIGH RISKS PARAMETERS 工作表 AO 列（MOQ 指标）
+        处理逻辑：取 AO 列最大 3 行。
+        料号列：AH 列。
+        """
         sheet_name = rule["Sheet"]
         df = self.data_df[sheet_name]
         # AO列最大3, PN在AH列

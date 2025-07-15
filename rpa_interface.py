@@ -1,3 +1,8 @@
+"""
+RPA 接口封装
+-------------
+对无代码 RPA 平台提供统一的 Python 调用入口，隐藏底层分析实现细节。
+"""
 from typing import Dict, List, Any
 from main import ExcelAnalyzer
 

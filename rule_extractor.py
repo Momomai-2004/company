@@ -1,3 +1,9 @@
+"""
+规则提取器
+----------
+旧版流程使用的规则解析模块：将规则表中的描述解析为可执行的数据提取逻辑。
+已被 `excel_analyzer_control.py` 取代，但保留以兼容现有 RPA 流程。
+"""
 from typing import Dict, List, Union, Tuple
 from utils import col_letter_to_index, parse_result_column
 
@@ -59,6 +65,23 @@ def extract_top_n_values(sheet_data: List[List], value_col: str, target_col: str
     return result
 
 def extract_rule_data(rule_row: Dict, data_dict: Dict[str, List[List]]) -> Dict:
+    """
+    根据单条规则行信息，从数据字典中提取对应指标结果。
+
+    Args:
+        rule_row: 规则表行（字典形式）
+        data_dict: 数据字典，键为 sheet 名称，值为二维列表 (含列头)
+
+    Returns:
+        Dict: 标准结果结构，同 `main.ExcelAnalyzer` 预期::
+
+            {
+                'description': str,
+                'result': Any,
+                'comments': str,
+                'optimization_plan': str
+            }
+    """
     sheet_name = rule_row['Sheet']
     if sheet_name not in data_dict:
         return {
