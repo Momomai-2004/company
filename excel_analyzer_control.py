@@ -86,6 +86,15 @@ class ExcelAnalyzerControl:
             
         return matched_rules
             
+    def _col_letter_to_index(self, letters: str) -> int:
+        """将Excel列字母转换为0索引的列号"""
+        idx = 0
+        for ch in letters.upper():
+            if not ('A' <= ch <= 'Z'):
+                continue
+            idx = idx * 26 + (ord(ch) - ord('A') + 1)
+        return idx - 1
+
     def analyze_by_rule(self, rule_id: int) -> Dict[str, Any]:
         """根据规则ID执行分析
         
@@ -100,6 +109,27 @@ class ExcelAnalyzerControl:
                 raise ValueError("请先加载Excel文件")
                 
             rule = self.rules_df.iloc[rule_id]
+            description = str(rule.get("Description", "")).lower()
+
+            # 针对具体业务规则的分派
+            if "inventory efficiency" in description or "库存效率" in description:
+                return self._analyze_inventory_efficiency(rule)
+            elif "shortage risk" in description or "缺料" in description:
+                return self._analyze_shortage_risk(rule)
+            elif "dead stock risk" in description or "呆滞风险" in description:
+                return self._analyze_dead_stock_risk(rule)
+            elif "impact of \"dead\" stock" in description or "金额最大的呆滞物料" in description:
+                return self._analyze_dead_stock_value(rule)
+            elif "days of transit" in description or "运输天数" in description:
+                return self._analyze_transit_inconsistencies(rule)
+            elif "safety time" in description or "安全时间" in description:
+                return self._analyze_safety_time(rule)
+            elif "no supplier" in description or "没有供应商" in description:
+                return self._analyze_no_supplier(rule)
+            elif "moq" in description:
+                return self._analyze_moq_impact(rule)
+
+            # 回退到通用规则类型解析
             sheet_name = rule["Sheet"]
             location = rule["Location"]
             rule_type = rule["Rule"]
@@ -303,13 +333,147 @@ class ExcelAnalyzerControl:
         """格式化分析结果"""
         if not result.get('success', False):
             return f"错误: {result.get('error', '未知错误')}"
-            
-        result_type = result.get('type')
-        if result_type == 'KPI':
+
+        t = result.get('type')
+        if t in {"缺料风险", "呆滞风险", "呆滞金额", "运输天数不一致", "安全时间过长", "MOQ影响"}:
+            return "; ".join([f"{pn}: {val}" if isinstance(val, (int, float)) else str(pn) for pn, val in result.get('items', [])])
+        elif t == "无供应商物料":
+            return ", ".join(map(str, result.get('items', [])))
+        elif t == "库存效率":
+            return f"{result['value']}% - {result['status']}"
+        elif t == "KPI":
             return f"值: {result['value']}, 状态: {result['status']}"
-        elif result_type == '最值':
+        elif t == "最值":
             return f"最大值: {result['max_values']}, 最小值: {result['min_values']}"
-        elif result_type == '单元格':
+        elif t == "单元格":
             return str(result['formatted_value'])
         else:
             return str(result) 
+
+    def _analyze_inventory_efficiency(self, rule: pd.Series) -> Dict[str, Any]:
+        sheet_name = rule["Sheet"]
+        value = self._get_cell_data(sheet_name, rule["Location"])
+        try:
+            value_f = float(value)
+        except Exception:
+            return {"success": False, "error": f"无法将{value}转换为数值"}
+
+        if value_f < 80:
+            status = "整体库存水平较低"
+        elif 80 <= value_f <= 120:
+            status = "整体库存水平合理"
+        else:
+            status = "整体库存水平较高"
+
+        suggestion = "检查基础参数准确性；针对水平较低深入分析缺料，较高则优化采购计划"
+        return {
+            "success": True,
+            "type": "库存效率",
+            "value": value_f,
+            "status": status,
+            "suggestion": suggestion
+        }
+
+    def _fetch_top_with_pn(self, df: pd.DataFrame, value_col: str, pn_col: str, n: int, largest: bool = True) -> List[Tuple[Any, Any]]:
+        v_idx = self._col_letter_to_index(value_col)
+        pn_idx = self._col_letter_to_index(pn_col)
+        series = df.iloc[:, v_idx]
+        sorter = series.nlargest(n) if largest else series.nsmallest(n)
+        rows = sorter.index
+        result = []
+        for idx in rows:
+            pn = df.iloc[idx, pn_idx]
+            val = series.loc[idx]
+            result.append((pn, val))
+        return result
+
+    def _analyze_shortage_risk(self, rule: pd.Series) -> Dict[str, Any]:
+        sheet_name = rule["Sheet"]
+        df = self.data_df[sheet_name]
+        # AS列百分比最低的5个料号, 料号在E列
+        top = self._fetch_top_with_pn(df, "AS", "E", 5, largest=False)
+        suggestion = "验证SAP参数，检查需求真实性，寻找替代料方案"
+        return {
+            "success": True,
+            "type": "缺料风险",
+            "items": top,
+            "suggestion": suggestion
+        }
+
+    def _analyze_dead_stock_risk(self, rule: pd.Series) -> Dict[str, Any]:
+        sheet_name = rule["Sheet"]
+        df = self.data_df[sheet_name]
+        # AS列百分比最高的5个料号, 料号在E列
+        top = self._fetch_top_with_pn(df, "AS", "E", 5, largest=True)
+        suggestion = "重点处理呆滞库存，优化采购/退货/调拨"
+        return {
+            "success": True,
+            "type": "呆滞风险",
+            "items": top,
+            "suggestion": suggestion
+        }
+
+    def _analyze_dead_stock_value(self, rule: pd.Series) -> Dict[str, Any]:
+        sheet_name = rule["Sheet"]
+        df = self.data_df[sheet_name]
+        # G列金额最大的3个, PN在A列
+        top = self._fetch_top_with_pn(df, "G", "A", 3, largest=True)
+        suggestion = "取消未交PO或转卖呆滞物料，内部调拨"
+        return {
+            "success": True,
+            "type": "呆滞金额",
+            "items": top,
+            "suggestion": suggestion
+        }
+
+    def _analyze_transit_inconsistencies(self, rule: pd.Series) -> Dict[str, Any]:
+        sheet_name = rule["Sheet"]
+        df = self.data_df[sheet_name]
+        # D列天数最大三个, PN在A列
+        top = self._fetch_top_with_pn(df, "D", "A", 3, largest=True)
+        suggestion = "在SAP中统一供应商运输时间，标准化物流协议"
+        return {
+            "success": True,
+            "type": "运输天数不一致",
+            "items": top,
+            "suggestion": suggestion
+        }
+
+    def _analyze_safety_time(self, rule: pd.Series) -> Dict[str, Any]:
+        sheet_name = rule["Sheet"]
+        df = self.data_df[sheet_name]
+        # N列最大一个, PN在H列
+        items = self._fetch_top_with_pn(df, "N", "H", 1, largest=True)
+        suggestion = "调整料号安全天数，优化库存策略"
+        return {
+            "success": True,
+            "type": "安全时间过长",
+            "items": items,
+            "suggestion": suggestion
+        }
+
+    def _analyze_no_supplier(self, rule: pd.Series) -> Dict[str, Any]:
+        sheet_name = rule["Sheet"]
+        df = self.data_df[sheet_name]
+        q_idx = self._col_letter_to_index("Q")
+        pns = df.iloc[:, q_idx].dropna().tolist()
+        suggestion = "检查替代料或增加供应商"
+        return {
+            "success": True,
+            "type": "无供应商物料",
+            "items": pns,
+            "suggestion": suggestion
+        }
+
+    def _analyze_moq_impact(self, rule: pd.Series) -> Dict[str, Any]:
+        sheet_name = rule["Sheet"]
+        df = self.data_df[sheet_name]
+        # AO列最大3, PN在AH列
+        items = self._fetch_top_with_pn(df, "AO", "AH", 3, largest=True)
+        suggestion = "与供应商谈判降低MOQ，调整采购策略"
+        return {
+            "success": True,
+            "type": "MOQ影响",
+            "items": items,
+            "suggestion": suggestion
+        }
