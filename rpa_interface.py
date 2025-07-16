@@ -5,6 +5,7 @@ RPA 接口封装
 """
 from typing import Dict, List, Any
 from main import ExcelAnalyzer
+import pandas as pd
 
 class RPAInterface:
     """
@@ -104,6 +105,15 @@ class RPAInterface:
             })
             
         return formatted_results
+
+    def load_rules(self) -> bool:
+        rules_df = pd.read_excel(self.excel, sheet_name=0)
+        for _, row in rules_df.iterrows():
+            self.rules[row['规则名称']] = {
+                'sheet_name': row['Sheet名称'],
+                'cell_position': row['单元格位置'],
+                'logic': row['计算逻辑']
+            }
 
 # RPA调用示例：
 """
